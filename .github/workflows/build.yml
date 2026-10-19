@@ -1,6 +1,9 @@
 name: "Build Begonia 4.14.186 Driver Loader Kernel"
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
