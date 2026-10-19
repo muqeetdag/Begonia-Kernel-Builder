@@ -1,358 +1,241 @@
-name: "Build kernels for release"
-
-env:
-  OUT_DIR: "${{ github.workspace }}/out"
+name: "Build Begonia 4.14.186 Driver Loader Kernel"
 
 on:
-  workflow_call:
-    inputs:
-      from_ci:
-        type: boolean
-        required: false
-        default: true
-
   workflow_dispatch:
 
 jobs:
-  Set-repos:
-    name: "🐂 Parse repos.json"
-    runs-on: ubuntu-latest
-    if: github.repository_owner == 'cvnertnc' && github.repository == 'cvnertnc/Begonia-Kernel-Builder'
-    outputs:
-      repos: ${{ steps.generate-matrix.outputs.repos }}
-      builddate: ${{ steps.generate-builddate.outputs.builddate }}
+  Build-Kernel:
+    name: "🚀 Build 4.14.186-driver-loader"
+    runs-on: ubuntu-22.04
+
     steps:
       - name: "😄 Checkout"
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: "😆 Generate Matrix"
-        id: generate-matrix
-        run: |
-          echo "repos<<EOF" >> $GITHUB_OUTPUT
-          jq -s '[.[][]]' repos/repos*.json >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-      - name: "⏰ Set builddate"
-        id: generate-builddate
-        run: echo "builddate=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
-
-  Build-Kernel:
-    name: "🐎 Build kernel"
-    runs-on: ubuntu-latest
-    if: github.repository_owner == 'cvnertnc' && github.repository == 'cvnertnc/Begonia-Kernel-Builder'
-    needs:
-      - Set-repos
-    strategy:
-      fail-fast: false
-      matrix:
-        repos: ${{ fromJSON(needs.Set-repos.outputs.repos) }}
-    env:
-      WORKSPACE: ${{ github.workspace }}
-      builddate: "${{ needs.Set-repos.outputs.builddate }}"
-
-      KNAME: ${{ matrix.repos.kernelName }}
-      KERNEL_DEVICE: ${{ matrix.repos.kernelSource.device }}
-      DEFCONFIG_NAME: ${{ matrix.repos.kernelSource.defconfig }}
-
-      withRoot: ${{ matrix.repos.withRoot }}
-      withSUSFS: ${{ matrix.repos.withSUSFS }}
-      whichSUSFS: ${{ matrix.repos.whichSUSFS }}
-      withKPM: ${{ matrix.repos.withKPM }}
-      ccache: ${{ matrix.repos.ccache }}
-      useAnykernel: ${{ matrix.repos.AnyKernel3.use }}
-      release: ${{ matrix.repos.AnyKernel3.release }}
-
-    steps:
-      - name: "🟣 Set Kernel Variables"
-        run: |
-          echo "KERNEL_NAME=${{ matrix.repos.kernelSource.name }}" >> $GITHUB_ENV
-          echo "KERNEL_REPO=${{ matrix.repos.kernelSource.repo }}" >> $GITHUB_ENV
-          echo "KERNEL_BRANCH=${{ matrix.repos.kernelSource.branch }}" >> $GITHUB_ENV
-
-          echo "toolchains=$(echo '${{ toJSON(matrix.repos.toolchains) }}' | jq -c)" >> $GITHUB_ENV
-          echo "params=$(echo '${{ toJSON(matrix.repos.params) }}' | jq -c)" >> $GITHUB_ENV
-          echo "THREAD=$(nproc --all)" >> $GITHUB_ENV
-
-      - name: "⭐ Install prerequisites"
+      - name: "⭐ Install dependencies"
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bc gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev libfl-dev
-          sudo apt-get install -y curl git ftp lftp wget libarchive-tools ccache
-          sudo apt-get install -y zip unzip tar gzip bzip2 rar unrar
-          sudo apt-get install -y checkinstall libncursesw5-dev libsqlite3-dev tk-dev libgdbm-dev libc6-dev libbz2-dev libffi-dev
-          wget https://www.python.org/ftp/python/2.7.18/Python-2.7.18.tgz
-          tar -xvf Python-2.7.18.tgz
-          cd Python-2.7.18
-          ./configure
-          make -j$(nproc)
-          sudo make install
-          curl https://bootstrap.pypa.io/pip/2.7/get-pip.py -o get-pip.py
-          sudo python2.7 get-pip.py
-          sudo update-alternatives --install /usr/bin/python python /usr/local/lib/python2.7 1
-          sudo update-alternatives --install /usr/bin/python python /usr/bin/python3 2 || true
-          cd ..
+          sudo apt-get install -y build-essential bc gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev libelf-dev flex bison zip curl git
 
-      - name: "🚮 Clear older runs"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: "💫 Clone Toolchain (Proton Clang 13)"
         run: |
-          gh run list -L400 --json databaseId -q '.[].databaseId' | tail -n+5 | xargs -IID gh api "repos/$GITHUB_REPOSITORY/actions/runs/ID" -X DELETE || :
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
 
-      - name: "🚄 Create cache key from `repos`"
-        if: ${{ env.ccache == 'true' }}
-        id: ccache_key
+      - name: "🌟 Clone Begonia 4.14.186 Kernel Source"
         run: |
-          ccache -o compression=false -o cache_dir=$HOME/.ccache
-          echo "CACHE_KEY=$(echo -n '${{ toJSON(matrix.repos) }}' | base64 -w 0 | cut -c -48)" >> $GITHUB_OUTPUT
+          git clone --depth=1 https://github.com/WuXing90/begonia_kernel_dev.git -b Suzaku-bka kernel_src
 
-      - name: "🚅 Cache ccache files"
-        if: ${{ env.ccache == 'true' }}
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.ccache
-            ${{ env.OUT_DIR }}
-          key: ccache-${{ env.KERNEL_NAME }}-${{ steps.ccache_key.outputs.CACHE_KEY }}-${{ env.builddate }}
-          restore-keys: |
-            ccache-${{ env.KERNEL_NAME }}-${{ steps.ccache_key.outputs.CACHE_KEY }}-${{ env.builddate }}
-
-      - name: "⏰ Setup Anykernel3"
-        env:
-          params: "${{ toJSON(matrix.repos.AnyKernel3) }}"
+      - name: "💉 Inject Built-in Driver Loader (/dev/BYNb ioctl 0x803)"
         run: |
-          ANYKERNEL_REPO=$(echo $params | jq -r ".repo")
-          ANYKERNEL_BRANCH=$(echo $params | jq -r ".branch")
-          git clone --recursive --depth=1 -j $(nproc) --branch $ANYKERNEL_BRANCH $ANYKERNEL_REPO AnyKernel3
+          cat << 'C_EOF' > kernel_src/drivers/misc/driver_loader_builtin.c
+          #include <linux/module.h>
+          #include <linux/kernel.h>
+          #include <linux/init.h>
+          #include <linux/fs.h>
+          #include <linux/cdev.h>
+          #include <linux/device.h>
+          #include <linux/uaccess.h>
 
-          echo "🤔 Setup Anykernel3 => ($ANYKERNEL_REPO)"
+          #define DRIVER_NAME "BYNb"
+          #define CLASS_NAME  "uevents_records"
+          #define IOCTL_MAGIC_CMD 0x803
 
-      - name: "🌟 Clone kernel source => (${{ env.KERNEL_REPO }})"
+          static dev_t dev_num;
+          static struct cdev my_cdev;
+          static struct class *my_class = NULL;
+          static struct device *my_device = NULL;
+
+          static long dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg) {
+              if (cmd == IOCTL_MAGIC_CMD) {
+                  unsigned long base_addr = 0x70000000;
+                  if (arg != 0) {
+                      if (copy_to_user((void __user *)arg, &base_addr, sizeof(base_addr))) {
+                          return -EFAULT;
+                      }
+                  }
+                  return 0x70000000;
+              }
+              return 0;
+          }
+
+          static const struct file_operations fops = {
+              .owner          = THIS_MODULE,
+              .unlocked_ioctl = dev_ioctl,
+              .compat_ioctl   = dev_ioctl,
+          };
+
+          static int __init driver_loader_builtin_init(void) {
+              alloc_chrdev_region(&dev_num, 0, 1, DRIVER_NAME);
+              cdev_init(&my_cdev, &fops);
+              cdev_add(&my_cdev, dev_num, 1);
+              my_class = class_create(THIS_MODULE, CLASS_NAME);
+              my_device = device_create(my_class, NULL, dev_num, NULL, DRIVER_NAME);
+              pr_info("[BYNb] Built-in Driver Loader active at /dev/%s\n", DRIVER_NAME);
+              return 0;
+          }
+
+          module_init(driver_loader_builtin_init);
+          MODULE_LICENSE("GPL");
+          C_EOF
+
+          echo "obj-y += driver_loader_builtin.o" >> kernel_src/drivers/misc/Makefile
+
+      - name: "⚙️ Apply FolkPatch Full Symbols Defconfig"
         run: |
-          git clone --recursive --depth=1 -j $(nproc) --branch $KERNEL_BRANCH $KERNEL_REPO $KERNEL_NAME
-          echo -e "\n⚠️ Kernel is at commit: $(git -C $KERNEL_NAME rev-parse HEAD)\n"
+          cat << 'DEFCONFIG_EOF' >> kernel_src/arch/arm64/configs/begonia_user_defconfig
+          CONFIG_KALLSYMS=y
+          CONFIG_KALLSYMS_ALL=y
+          CONFIG_KALLSYMS_BASE_RELATIVE=y
+          CONFIG_KPROBES=y
+          CONFIG_HAVE_KPROBES=y
+          CONFIG_OVERLAY_FS=y
+          CONFIG_OVERLAY_FS_REDIRECT_DIR=y
+          CONFIG_OVERLAY_FS_INDEX=y
+          DEFCONFIG_EOF
 
-          echo "🤔 Clone kernel source => ($KERNEL_REPO)"
-
-      - name: "💫 Get toolchains"
+      - name: "🎶 Build Kernel (Image.gz-dtb)"
         run: |
-          toolchains_num="$(echo $toolchains | jq 'length')"
-          echo "🤔 There is $toolchains_num defined toolchains."
-          for ((i=0;i<toolchains_num;i++)); do
-            toolchain_name=$(echo $toolchains | jq -r ".[$i].name")
-            # Github
-            toolchain_repo=$(echo $toolchains | jq -r ".[$i].repo")
-            toolchain_branch=$(echo $toolchains | jq -r ".[$i].branch")
-            # From archive
-            toolchain_url=$(echo $toolchains | jq -r ".[$i].url")
-
-            echo $toolchain_url
-            if [ -z "${toolchain_url:-}" ] || [ "$toolchain_url" = "null" ];  then
-              git clone --recursive --depth=1 -j $(nproc) --branch $toolchain_branch $toolchain_repo $toolchain_name
-              echo "🤔 Clone $toolchain_name => ($toolchain_repo)"
-            else
-              wget "$toolchain_url"
-              filename="${toolchain_url##*/}"
-              mkdir -p $toolchain_name
-              case "$filename" in
-                *.zip)
-                  unzip -d $toolchain_name "$filename"
-                  ;;
-                *.tar)
-                  tar xvf "$filename" -C $toolchain_name
-                  ;;
-                *.tar.gz)
-                  tar zxvf "$filename" -C $toolchain_name
-                  ;;
-                *.rar)
-                  unrar x "$filename" $toolchain_name
-                  ;;
-                *)
-                  echo "unknown file type: $filename"
-                  ;;
-              esac
-            fi
-
-            jq -r ".[$i].binPath[] | tostring" <<< "$toolchains" | while read -r bin_path; do
-              echo "$WORKSPACE/$toolchain_name/$bin_path" >> $GITHUB_PATH
-            done
-          done
-
-      - name: "😎 Set args"
-        id: generate-args
-        run: |
-          echo "🤔 PATH Variable: $PATH"
-
-          ARCH=$(echo $params | jq -r ".ARCH")
-          CC=$(echo $params | jq -r ".CC")
-
-          args="-j${{ env.THREAD }}"
-          if [ -n "${{ env.OUT_DIR }}" ]; then
-            mkdir -p ${{ env.OUT_DIR }} && args="$args O=${{ env.OUT_DIR }}"
-          fi
-          if [ -n "$ARCH" ]; then
-            args="$args ARCH=$ARCH"
-          fi
-          if [ -n "$CC" ]; then
-
-            if [[ "$CC" == *"/"* ]]; then
-              CC=${{ env.WORKSPACE }}/$CC
-            fi
-
-            if [ ${{ env.ccache }} = true ]; then
-              args="$args CC=\"ccache $CC\""
-            else
-              args="$args CC=$CC"
-            fi
-          fi
-          while read -r externalCommand; do
-            key=$(echo "$externalCommand" | cut -d= -f1)
-            value=$(echo "$externalCommand" | cut -d= -f2)
-            if [[ "$value" == *"/"* ]]; then
-              value="${{ env.WORKSPACE }}/$value"
-            fi
-            args="$args $key=$value"
-          done < <(jq -r '.externalCommand | to_entries[] | "\(.key)=\(.value)"' <<< "$params")
-
-          echo "🤔 $args"
-          echo "ARCH=$ARCH" >> $GITHUB_OUTPUT
-          echo "args=$args" >> $GITHUB_OUTPUT
-
-      - name: "🪡 Receiving scripts"
-        id: receiving-scripts
-        working-directory: ${{ env.KERNEL_NAME }}
-        env:
-          SUS_URL: ${{ secrets.SUS_URL }}          # şifreli zip'in indirileceği URL
-          SUS_PASSWORD: ${{ secrets.SUS_PASSWORD }} # openssl şifresi
-        run: |
-          if [ -d "./BKB" ]; then
-            rm -rf "./BKB"
-          fi
-      
-          echo "⬇️  Downloading encrypted BKB archive..."
-          wget -q -O sus.zip.enc "$SUS_URL"
-      
-          echo "🔓 Decrypting..."
-          openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 \
-            -in sus.zip.enc -out sus.zip \
-            -pass env:SUS_PASSWORD
-      
-          mkdir -p BKB
-          unzip -q sus.zip -d BKB/
-      
-          rm -f sus.zip sus.zip.enc
-      
-          echo "✅ BKB scripts ready at $(pwd)/BKB"
-
-      - name: "💉 APatch, SukiSU setup and [BACKPORT]: ptrace"
-        id: apatch-sukisu-setup
-        working-directory: ${{ env.KERNEL_NAME }}
-        env:
-          arch: ${{ steps.generate-args.outputs.ARCH }}
-          DEFCONFIG_NAME: ${{ env.DEFCONFIG_NAME }}
-          GH_PAT: ${{ secrets.GH_PAT }}
-          GITHUB_OUTPUT: ${{ github.output_path }}
-        run: |
-          BKB_YML=releases
-          chmod +x BKB/kernel_patches/bkb/$BKB_YML/apatch_sukisu_setup.sh
-          ./BKB/kernel_patches/bkb/$BKB_YML/apatch_sukisu_setup.sh
-
-      - name: "😋 Integrate KernelSU or KernelSU-Next"
-        id: integrate-kernelsu-next
-        working-directory: ${{ env.KERNEL_NAME }}
-        if: ${{ env.withRoot == 'ksu' || env.withRoot == 'sukisu' || env.withRoot == 'ksun' }}
-        env:
-          arch: ${{ steps.generate-args.outputs.ARCH }}
-          DEFCONFIG_NAME: ${{ env.DEFCONFIG_NAME }}
-          GH_PAT: ${{ secrets.GH_PAT }}
-          GITHUB_OUTPUT: ${{ github.output_path }}
-          withRoot: ${{ env.withRoot }}
-          withKPM: ${{ env.withKPM }}
-          KNAME: ${{ env.KNAME }}
-        run: |
-          BKB_YML=releases
-          chmod +x BKB/kernel_patches/bkb/$BKB_YML/integrate_kernelsu.sh
-          ./BKB/kernel_patches/bkb/$BKB_YML/integrate_kernelsu.sh
-
-      - name: "🥷 Add SUSFS patches"
-        id: add-susfs-patches
-        working-directory: ${{ env.KERNEL_NAME }}
-        if: ${{ (env.withRoot == 'ksu' || env.withRoot == 'sukisu' || env.withRoot == 'ksun') && env.withSUSFS == 'true' }}
-        env:
-          arch: ${{ steps.generate-args.outputs.ARCH }}
-          DEFCONFIG_NAME: ${{ env.DEFCONFIG_NAME }}
-          GH_PAT: ${{ secrets.GH_PAT }}
-          GITHUB_OUTPUT: ${{ github.output_path }}
-          withRoot: ${{ env.withRoot }}
-          withSUSFS: ${{ env.withSUSFS }}
-          whichSUSFS: ${{ matrix.repos.whichSUSFS }}
-          KNAME: ${{ env.KNAME }}
-        run: |
-          BKB_YML=releases
-          chmod +x BKB/kernel_patches/bkb/$BKB_YML/add_susfs_patches.sh
-          ./BKB/kernel_patches/bkb/$BKB_YML/add_susfs_patches.sh
-
-      - name: "👍 Make defconfig"
-        working-directory: ${{ env.KERNEL_NAME }}
-        env:
-          args: ${{ steps.generate-args.outputs.args }}
-          arch: ${{ steps.generate-args.outputs.ARCH }}
-        run: |
-          echo "PATH Variable: $PATH"
-          make ${{ env.args }} ${{ env.DEFCONFIG_NAME }}
-
-      - name: "🎶 Build kernel"
-        working-directory: ${{ env.KERNEL_NAME }}
-        env:
-          args: ${{ steps.generate-args.outputs.args }}
-        run: |
-          echo "PATH Variable: $PATH"
-          make ${{ env.args }}
-
-      - name: "☯️ KPM Injection"
-        id: kpm-inject
-        working-directory: ${{ env.KERNEL_NAME }}
-        if: ${{ env.withRoot == 'sukisu' && env.withKPM == 'true' }}
-        env:
-          arch: ${{ steps.generate-args.outputs.ARCH }}
-          OUT_DIR: ${{ env.OUT_DIR }}
-        run: |
-          BKB_YML=releases
-          chmod +x BKB/kernel_patches/bkb/$BKB_YML/kpm_injection.sh
-          ./BKB/kernel_patches/bkb/$BKB_YML/kpm_injection.sh
+          cd kernel_src
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          make O=out begonia_user_defconfig
+          make -j$(nproc --all) O=out CC=clang Image.gz-dtb
+          cp out/arch/arm64/boot/Image.gz-dtb $GITHUB_WORKSPACE/Image.gz-dtb
 
       - name: "❤️ Pack AnyKernel3.zip"
-        if: ${{ env.useAnykernel == 'true' }}
-        env:
-          arch: ${{ steps.generate-args.outputs.ARCH }}
-          anykernel: "${{ env.WORKSPACE }}/${{ env.KERNEL_DEVICE }}-${{ steps.integrate-kernelsu-next.outputs.ROOT_VERSION }}-${{ env.KERNEL_NAME }}-${{ env.builddate }}"
         run: |
-          ls -al
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/' AnyKernel3/anykernel.sh
+          sed -i 's/device.name1=.*/device.name1=begonia/' AnyKernel3/anykernel.sh
+          cp Image.gz-dtb AnyKernel3/Image.gz-dtb
+          cd AnyKernel3
+          zip -r -q -9 $GITHUB_WORKSPACE/Begonia-4.14.186-DriverLoader-FolkPatch.zip *
 
-          if [ -e "${{ env.OUT_DIR }}/arch/${{ env.arch }}/boot/Image.gz" ]; then
-            cp -f ${{ env.OUT_DIR }}/arch/${{ env.arch }}/boot/Image.gz ./AnyKernel3/
-          fi
-
-          cd AnyKernel3/
-          zip -q -r "${{ env.anykernel }}.zip" *
-
-      - name: "💾 Upload AnyKernel3 image => (${{ env.builddate }})"
+      - name: "💾 Upload Kernel Zip Artifact"
         uses: actions/upload-artifact@v4
-        if: ${{ env.useAnykernel == 'true' }}
         with:
-          name: "${{ env.KERNEL_DEVICE }}-${{ steps.integrate-kernelsu-next.outputs.ROOT_VERSION }}-${{ env.KERNEL_NAME }}-${{ env.builddate }}"
-          path: AnyKernel3/*
+          name: Begonia-4.14.186-DriverLoader-FolkPatch
+          path: Begonia-4.14.186-DriverLoader-FolkPatch.zipname: "Build Begonia 4.14.186 Driver Loader Kernel"
 
-      - name: 🧧 Create GitHub Release => (${{ env.builddate }})
-        continue-on-error: false
-        uses: softprops/action-gh-release@v2.1.0
-        if: ${{ env.useAnykernel == 'true' && env.release == 'true' }}
+on:
+  workflow_dispatch:
+
+jobs:
+  Build-Kernel:
+    name: "🚀 Build 4.14.186-driver-loader"
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: "😄 Checkout"
+        uses: actions/checkout@v4
+
+      - name: "⭐ Install dependencies"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev libelf-dev flex bison zip curl git
+
+      - name: "💫 Clone Toolchain (Proton Clang 13)"
+        run: |
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
+
+      - name: "🌟 Clone Begonia 4.14.186 Kernel Source"
+        run: |
+          git clone --depth=1 https://github.com/WuXing90/begonia_kernel_dev.git -b Suzaku-bka kernel_src
+
+      - name: "💉 Inject Built-in Driver Loader (/dev/BYNb ioctl 0x803)"
+        run: |
+          cat << 'C_EOF' > kernel_src/drivers/misc/driver_loader_builtin.c
+          #include <linux/module.h>
+          #include <linux/kernel.h>
+          #include <linux/init.h>
+          #include <linux/fs.h>
+          #include <linux/cdev.h>
+          #include <linux/device.h>
+          #include <linux/uaccess.h>
+
+          #define DRIVER_NAME "BYNb"
+          #define CLASS_NAME  "uevents_records"
+          #define IOCTL_MAGIC_CMD 0x803
+
+          static dev_t dev_num;
+          static struct cdev my_cdev;
+          static struct class *my_class = NULL;
+          static struct device *my_device = NULL;
+
+          static long dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg) {
+              if (cmd == IOCTL_MAGIC_CMD) {
+                  unsigned long base_addr = 0x70000000;
+                  if (arg != 0) {
+                      if (copy_to_user((void __user *)arg, &base_addr, sizeof(base_addr))) {
+                          return -EFAULT;
+                      }
+                  }
+                  return 0x70000000;
+              }
+              return 0;
+          }
+
+          static const struct file_operations fops = {
+              .owner          = THIS_MODULE,
+              .unlocked_ioctl = dev_ioctl,
+              .compat_ioctl   = dev_ioctl,
+          };
+
+          static int __init driver_loader_builtin_init(void) {
+              alloc_chrdev_region(&dev_num, 0, 1, DRIVER_NAME);
+              cdev_init(&my_cdev, &fops);
+              cdev_add(&my_cdev, dev_num, 1);
+              my_class = class_create(THIS_MODULE, CLASS_NAME);
+              my_device = device_create(my_class, NULL, dev_num, NULL, DRIVER_NAME);
+              pr_info("[BYNb] Built-in Driver Loader active at /dev/%s\n", DRIVER_NAME);
+              return 0;
+          }
+
+          module_init(driver_loader_builtin_init);
+          MODULE_LICENSE("GPL");
+          C_EOF
+
+          echo "obj-y += driver_loader_builtin.o" >> kernel_src/drivers/misc/Makefile
+
+      - name: "⚙️ Apply FolkPatch Full Symbols Defconfig"
+        run: |
+          cat << 'DEFCONFIG_EOF' >> kernel_src/arch/arm64/configs/begonia_user_defconfig
+          CONFIG_KALLSYMS=y
+          CONFIG_KALLSYMS_ALL=y
+          CONFIG_KALLSYMS_BASE_RELATIVE=y
+          CONFIG_KPROBES=y
+          CONFIG_HAVE_KPROBES=y
+          CONFIG_OVERLAY_FS=y
+          CONFIG_OVERLAY_FS_REDIRECT_DIR=y
+          CONFIG_OVERLAY_FS_INDEX=y
+          DEFCONFIG_EOF
+
+      - name: "🎶 Build Kernel (Image.gz-dtb)"
+        run: |
+          cd kernel_src
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          make O=out begonia_user_defconfig
+          make -j$(nproc --all) O=out CC=clang Image.gz-dtb
+          cp out/arch/arm64/boot/Image.gz-dtb $GITHUB_WORKSPACE/Image.gz-dtb
+
+      - name: "❤️ Pack AnyKernel3.zip"
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/' AnyKernel3/anykernel.sh
+          sed -i 's/device.name1=.*/device.name1=begonia/' AnyKernel3/anykernel.sh
+          cp Image.gz-dtb AnyKernel3/Image.gz-dtb
+          cd AnyKernel3
+          zip -r -q -9 $GITHUB_WORKSPACE/Begonia-4.14.186-DriverLoader-FolkPatch.zip *
+
+      - name: "💾 Upload Kernel Zip Artifact"
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: v${{ env.builddate }}
-          name: v${{ env.builddate }}
-          make_latest: true
-          prerelease: false
-          draft: false
-          generate_release_notes: false
-          body: "Power kernel By [Saikrishna1504](https://github.com/Saikrishna1504)\nBuild with Github by [cvnertnc](https://github.com/cvnertnc)\nAll Linux kernel patched with [KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next) + [SUSFS](https://gitlab.com/simonpunk/susfs4ksu) for Xiaomi Redmi Note 8 Pro (begonia).\n\n**Installation:**\n1. Flash the kernel from this release.\n2. Download and install the Manager\n\nKernelSU Next:\n> [![Stable Version](https://img.shields.io/github/v/release/KernelSU-Next/KernelSU-Next?label=Release&logo=github)](https://github.com/KernelSU-Next/KernelSU-Next/releases/latest) [![Nightly Version](https://img.shields.io/badge/Nightly%20Release-gray?logo=hackthebox&logoColor=fff)](https://nightly.link/KernelSU-Next/KernelSU-Next/workflows/build-manager-ci/next/Manager)\n\n3. Download and install the SUSFS Module:\n> [![Stable Version](https://img.shields.io/github/v/release/sidex15/susfs4ksu-module?label=Release&logo=github)](https://github.com/sidex15/susfs4ksu-module/releases/latest) [![Nightly Version](https://img.shields.io/badge/Nightly%20Release-gray?logo=hackthebox&logoColor=fff)](https://nightly.link/sidex15/susfs4ksu-module/workflows/build/v1.5.2+)\n\n4. Download and install Mountify Module [![Mountify Module](https://img.shields.io/github/v/release/backslashxx/mountify?label=Release&logo=github)](https://github.com/backslashxx/mountify/releases/latest)"
-          files: "${{ env.WORKSPACE }}/${{ env.KERNEL_DEVICE }}-${{ steps.integrate-kernelsu-next.outputs.ROOT_VERSION }}-${{ env.KERNEL_NAME }}-${{ env.builddate }}.zip"
-          fail_on_unmatched_files: true
-          preserve_order: true
+          name: Begonia-4.14.186-DriverLoader-FolkPatch
+          path: Begonia-4.14.186-DriverLoader-FolkPatch.zip
